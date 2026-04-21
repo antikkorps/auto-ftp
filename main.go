@@ -520,15 +520,15 @@ func buildGUI(a fyne.App, graphiquesDir, logPath string, ips []string, onClose f
 
 	mkCopyBtn := func(value string) *widget.Button {
 		var btn *widget.Button
-		btn = widget.NewButton("Copier", func() {
+		btn = widget.NewButtonWithIcon("", theme.ContentCopyIcon(), func() {
 			a.Clipboard().SetContent(value)
-			btn.SetText("Copié !")
+			btn.SetIcon(theme.ConfirmIcon())
 			btn.Importance = widget.SuccessImportance
 			btn.Refresh()
 			go func(b *widget.Button) {
 				time.Sleep(1500 * time.Millisecond)
 				fyne.Do(func() {
-					b.SetText("Copier")
+					b.SetIcon(theme.ContentCopyIcon())
 					b.Importance = widget.MediumImportance
 					b.Refresh()
 				})
@@ -548,7 +548,7 @@ func buildGUI(a fyne.App, graphiquesDir, logPath string, ips []string, onClose f
 		t := canvas.NewText(text, textMuted)
 		t.TextStyle = fyne.TextStyle{Bold: true}
 		t.TextSize = 13
-		t.Alignment = fyne.TextAlignTrailing
+		t.Alignment = fyne.TextAlignLeading
 		return t
 	}
 
@@ -611,16 +611,18 @@ func buildGUI(a fyne.App, graphiquesDir, logPath string, ips []string, onClose f
 	activityLabel.TextSize = 12
 	activity := &activityTracker{label: activityLabel}
 
+	requestClose := func() {
+		onClose()
+		w.Close()
+	}
+
 	openBtn := widget.NewButton("Ouvrir le dossier", func() {
 		openFolder(graphiquesDir)
 	})
 	logsBtn := widget.NewButton("Voir les logs", func() {
 		openInNotepad(logPath)
 	})
-	quitBtn := widget.NewButton("Arrêter le serveur", func() {
-		onClose()
-		a.Quit()
-	})
+	quitBtn := widget.NewButton("Arrêter le serveur", requestClose)
 	quitBtn.Importance = widget.WarningImportance
 
 	folderCard := makeCard(container.NewVBox(
@@ -643,6 +645,7 @@ func buildGUI(a fyne.App, graphiquesDir, logPath string, ips []string, onClose f
 	)
 
 	w.SetContent(container.NewPadded(container.NewPadded(root)))
+	w.SetCloseIntercept(requestClose)
 	w.SetOnClosed(onClose)
 	return &gui{
 		window:      w,
@@ -660,6 +663,12 @@ func main() {
 		os.Exit(1)
 	}
 	logger.Info("auto-ftp starting", "port", ftpPort, "user", ftpUser, "folder", folderName)
+
+	if !acquireSingleton(logger) {
+		logger.Warn("another instance is already running, focusing existing window")
+		focusExistingWindow(appName)
+		return
+	}
 
 	graphiquesDir, err := ensureGraphiquesDir()
 	if err != nil {
