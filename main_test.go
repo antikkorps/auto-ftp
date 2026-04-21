@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -96,5 +97,28 @@ func TestLocalIPv4s_ExcludesLoopback(t *testing.T) {
 		if ip == "127.0.0.1" {
 			t.Errorf("loopback 127.0.0.1 should not be in localIPv4s output")
 		}
+	}
+}
+
+func TestShortBindError(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want string
+	}{
+		{"address in use linux", errors.New("listen tcp 0.0.0.0:2121: bind: address already in use"), fmt.Sprintf("PORT %d DÉJÀ UTILISÉ", ftpPort)},
+		{"address in use windows", errors.New("listen tcp 0.0.0.0:2121: bind: Only one usage of each socket address is normally permitted."), fmt.Sprintf("PORT %d DÉJÀ UTILISÉ", ftpPort)},
+		{"permission denied linux", errors.New("listen tcp 0.0.0.0:21: bind: permission denied"), "PERMISSION REFUSÉE"},
+		{"permission denied windows", errors.New("listen tcp 0.0.0.0:21: bind: access is denied."), "PERMISSION REFUSÉE"},
+		{"unknown error", errors.New("something completely different"), "DÉMARRAGE IMPOSSIBLE"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := shortBindError(tc.err)
+			if got != tc.want {
+				t.Errorf("got %q, want %q", got, tc.want)
+			}
+		})
 	}
 }

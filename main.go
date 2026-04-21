@@ -41,13 +41,17 @@ const (
 )
 
 var (
-	accentGreen   = color.NRGBA{R: 0x1e, G: 0x96, B: 0x3f, A: 0xff}
-	accentGreenLt = color.NRGBA{R: 0xe5, G: 0xf6, B: 0xea, A: 0xff}
-	textDark      = color.NRGBA{R: 0x1c, G: 0x26, B: 0x35, A: 0xff}
-	textMuted     = color.NRGBA{R: 0x64, G: 0x70, B: 0x82, A: 0xff}
-	bgSoft        = color.NRGBA{R: 0xf6, G: 0xf8, B: 0xfb, A: 0xff}
-	cardBg        = color.NRGBA{R: 0xff, G: 0xff, B: 0xff, A: 0xff}
-	cardBorder    = color.NRGBA{R: 0xe3, G: 0xe8, B: 0xef, A: 0xff}
+	accentGreen    = color.NRGBA{R: 0x1e, G: 0x96, B: 0x3f, A: 0xff}
+	accentGreenLt  = color.NRGBA{R: 0xe5, G: 0xf6, B: 0xea, A: 0xff}
+	accentRed      = color.NRGBA{R: 0xc8, G: 0x2b, B: 0x3a, A: 0xff}
+	accentRedLt    = color.NRGBA{R: 0xfb, G: 0xe9, B: 0xeb, A: 0xff}
+	accentRedBord  = color.NRGBA{R: 0xc8, G: 0x2b, B: 0x3a, A: 0x33}
+	accentGreenBrd = color.NRGBA{R: 0x1e, G: 0x96, B: 0x3f, A: 0x33}
+	textDark       = color.NRGBA{R: 0x1c, G: 0x26, B: 0x35, A: 0xff}
+	textMuted      = color.NRGBA{R: 0x64, G: 0x70, B: 0x82, A: 0xff}
+	bgSoft         = color.NRGBA{R: 0xf6, G: 0xf8, B: 0xfb, A: 0xff}
+	cardBg         = color.NRGBA{R: 0xff, G: 0xff, B: 0xff, A: 0xff}
+	cardBorder     = color.NRGBA{R: 0xe3, G: 0xe8, B: 0xef, A: 0xff}
 )
 
 type driver struct {
@@ -252,7 +256,36 @@ func setupLogger() (*slog.Logger, string, error) {
 	return slog.New(h), logPath, nil
 }
 
-func makeStatusBadge() fyne.CanvasObject {
+type statusBadge struct {
+	obj   fyne.CanvasObject
+	dot   *canvas.Text
+	label *canvas.Text
+	bg    *canvas.Rectangle
+}
+
+func (s *statusBadge) setOnline() {
+	s.dot.Color = accentGreen
+	s.label.Color = accentGreen
+	s.label.Text = "SERVEUR EN LIGNE"
+	s.bg.FillColor = accentGreenLt
+	s.bg.StrokeColor = accentGreenBrd
+	s.dot.Refresh()
+	s.label.Refresh()
+	s.bg.Refresh()
+}
+
+func (s *statusBadge) setError(text string) {
+	s.dot.Color = accentRed
+	s.label.Color = accentRed
+	s.label.Text = text
+	s.bg.FillColor = accentRedLt
+	s.bg.StrokeColor = accentRedBord
+	s.dot.Refresh()
+	s.label.Refresh()
+	s.bg.Refresh()
+}
+
+func makeStatusBadge() *statusBadge {
 	dot := canvas.NewText("●", accentGreen)
 	dot.TextSize = 14
 	dot.TextStyle = fyne.TextStyle{Bold: true}
@@ -266,11 +299,54 @@ func makeStatusBadge() fyne.CanvasObject {
 
 	bg := canvas.NewRectangle(accentGreenLt)
 	bg.CornerRadius = 14
-	bg.StrokeColor = color.NRGBA{R: 0x1e, G: 0x96, B: 0x3f, A: 0x33}
+	bg.StrokeColor = accentGreenBrd
 	bg.StrokeWidth = 1
 
 	stack := container.NewStack(bg, padded)
-	return container.NewCenter(stack)
+	return &statusBadge{
+		obj:   container.NewCenter(stack),
+		dot:   dot,
+		label: label,
+		bg:    bg,
+	}
+}
+
+func makeErrorBanner() (fyne.CanvasObject, *canvas.Text) {
+	title := canvas.NewText("Le serveur FTP n'a pas pu démarrer", accentRed)
+	title.TextStyle = fyne.TextStyle{Bold: true}
+	title.TextSize = 14
+
+	detail := canvas.NewText("", textDark)
+	detail.TextSize = 12
+
+	hint := canvas.NewText("Ouvrez « Voir les logs » et contactez le support en leur lisant le message ci-dessus.", textMuted)
+	hint.TextSize = 11
+
+	content := container.NewVBox(title, detail, hint)
+
+	bg := canvas.NewRectangle(accentRedLt)
+	bg.CornerRadius = 10
+	bg.StrokeColor = accentRedBord
+	bg.StrokeWidth = 1
+
+	banner := container.NewStack(bg, container.NewPadded(container.NewPadded(content)))
+	return banner, detail
+}
+
+func shortBindError(err error) string {
+	msg := err.Error()
+	lower := strings.ToLower(msg)
+	switch {
+	case strings.Contains(lower, "address already in use"),
+		strings.Contains(lower, "only one usage of each socket"),
+		strings.Contains(lower, "bind: address in use"):
+		return fmt.Sprintf("PORT %d DÉJÀ UTILISÉ", ftpPort)
+	case strings.Contains(lower, "permission denied"),
+		strings.Contains(lower, "access is denied"):
+		return "PERMISSION REFUSÉE"
+	default:
+		return "DÉMARRAGE IMPOSSIBLE"
+	}
 }
 
 func makeCard(content fyne.CanvasObject) fyne.CanvasObject {
@@ -281,9 +357,29 @@ func makeCard(content fyne.CanvasObject) fyne.CanvasObject {
 	return container.NewStack(bg, container.NewPadded(container.NewPadded(content)))
 }
 
-func buildGUI(a fyne.App, graphiquesDir, logPath string, ips []string, onClose func()) fyne.Window {
+type gui struct {
+	window       fyne.Window
+	badge        *statusBadge
+	errorBanner  fyne.CanvasObject
+	errorDetail  *canvas.Text
+}
+
+func (g *gui) applyError(badgeText, detail string) {
+	g.badge.setError(badgeText)
+	g.errorDetail.Text = detail
+	g.errorDetail.Refresh()
+	g.errorBanner.Show()
+}
+
+func (g *gui) showErrorFromGoroutine(badgeText, detail string) {
+	fyne.Do(func() {
+		g.applyError(badgeText, detail)
+	})
+}
+
+func buildGUI(a fyne.App, graphiquesDir, logPath string, ips []string, onClose func()) *gui {
 	w := a.NewWindow(appName)
-	w.Resize(fyne.NewSize(620, 560))
+	w.Resize(fyne.NewSize(620, 600))
 
 	title := canvas.NewText(appName, textDark)
 	title.TextSize = 26
@@ -294,10 +390,14 @@ func buildGUI(a fyne.App, graphiquesDir, logPath string, ips []string, onClose f
 	subtitle.TextSize = 13
 	subtitle.Alignment = fyne.TextAlignCenter
 
+	badge := makeStatusBadge()
+	errorBanner, errorDetail := makeErrorBanner()
+	errorBanner.Hide()
+
 	header := container.NewVBox(
 		title,
 		container.NewPadded(subtitle),
-		makeStatusBadge(),
+		badge.obj,
 	)
 
 	mkCopyBtn := func(value string) *widget.Button {
@@ -413,6 +513,7 @@ func buildGUI(a fyne.App, graphiquesDir, logPath string, ips []string, onClose f
 
 	root := container.NewVBox(
 		container.NewPadded(header),
+		errorBanner,
 		card,
 		folderCard,
 		firewall,
@@ -420,7 +521,12 @@ func buildGUI(a fyne.App, graphiquesDir, logPath string, ips []string, onClose f
 
 	w.SetContent(container.NewPadded(container.NewPadded(root)))
 	w.SetOnClosed(onClose)
-	return w
+	return &gui{
+		window:      w,
+		badge:       badge,
+		errorBanner: errorBanner,
+		errorDetail: errorDetail,
+	}
 }
 
 func main() {
@@ -448,13 +554,12 @@ func main() {
 	server := ftpserver.NewFtpServer(drv)
 	server.Logger = logger
 
-	go func() {
+	bindErr := server.Listen()
+	if bindErr != nil {
+		logger.Error("ftp server bind failed", "error", bindErr)
+	} else {
 		logger.Info("ftp server listening", "addr", fmt.Sprintf("0.0.0.0:%d", ftpPort))
-		if err := server.ListenAndServe(); err != nil {
-			logger.Error("ftp server stopped", "error", err)
-		}
-	}()
-	time.Sleep(150 * time.Millisecond)
+	}
 
 	a := app.NewWithID("com.franck.auto-ftp")
 	a.Settings().SetTheme(customTheme{})
@@ -468,7 +573,19 @@ func main() {
 		logger.Info("stopping ftp server")
 		_ = server.Stop()
 	}
-	w := buildGUI(a, graphiquesDir, logPath, ips, onClose)
-	w.ShowAndRun()
+	g := buildGUI(a, graphiquesDir, logPath, ips, onClose)
+
+	if bindErr != nil {
+		g.applyError(shortBindError(bindErr), bindErr.Error())
+	} else {
+		go func() {
+			if err := server.Serve(); err != nil && !stopped {
+				logger.Error("ftp server crashed", "error", err)
+				g.showErrorFromGoroutine("SERVEUR ARRÊTÉ", err.Error())
+			}
+		}()
+	}
+
+	g.window.ShowAndRun()
 	logger.Info("gui closed, bye")
 }
