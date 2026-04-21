@@ -1,71 +1,67 @@
-# Auto-FTP for EasyVIEW
+# auto-ftp — developer guide
 
-A zero-config, portable local FTP server packaged as a single Windows
-executable. Built to receive files from **EasyVIEW** running in a
-VirtualBox VM, so they can then be synced from the host PC (USB stick,
-backup script, etc.).
+Zero-config local FTP server packaged as a single Windows executable,
+designed to receive files from EasyVIEW running in a VirtualBox VM.
 
-## Purpose
+**For on-site installation, deployment, and troubleshooting, see
+[`DEPLOYMENT.md`](./DEPLOYMENT.md)** — that file is the right target for
+the operator on site and for phone support.
 
-The on-site staff is non-technical and has no admin rights. The tool
-must work with a **single double-click**, without configuration, and
-restart automatically after a reboot.
+This README is the technical reference for building, testing, and
+extending the tool.
 
-## How it works
+## Stack
 
-On launch, `auto-ftp.exe`:
+- **Go** (currently 1.25) + CGO
+- [Fyne v2](https://fyne.io/) for the GUI
+- [fclairamb/ftpserverlib](https://github.com/fclairamb/ftpserverlib) for the FTP server
+- [spf13/afero](https://github.com/spf13/afero) for filesystem abstraction and path sandboxing
+- [fsnotify/fsnotify](https://github.com/fsnotify/fsnotify) for activity detection
+- [natefinch/lumberjack](https://github.com/natefinch/lumberjack) for log rotation
+- [jlaffaye/ftp](https://github.com/jlaffaye/ftp) (test-only) as the FTP client in end-to-end tests
 
-1. Creates a `graphiques/` folder next to the executable (if missing)
-2. Creates a `logs/` folder next to the executable for log files
-3. Drops an `auto-ftp.vbs` into the user's `Startup` folder so the app
-   relaunches at next Windows boot (silent, no admin rights required,
-   reversible by deleting the VBS)
-4. Starts an FTP server on `0.0.0.0:2121` (PASV on 2122-2130)
-5. Opens a window displaying the settings to enter in EasyVIEW (IP,
-   port, user, password), each with a **Copy** button
+## Source layout
 
-Closing the window or clicking **Stop server** shuts the server down
-cleanly.
+- `main.go` — everything cross-platform: config, driver, GUI, main loop
+- `singleton_windows.go` — Windows-only named mutex + window focus (build tag `windows`)
+- `singleton_other.go` — no-op stubs for other OSes (build tag `!windows`)
+- `main_test.go` — unit tests for pure helpers
+- `e2e_test.go` — end-to-end tests spinning up a real FTP server on 127.0.0.1
 
-## Hardcoded credentials
+## Build
 
-| Setting        | Value    |
-| -------------- | -------- |
-| Port           | `2121`   |
-| User           | `vmsync` (override at build time) |
-| Password       | `vmsync` (override at build time) |
-| Target folder  | `graphiques/` (next to the exe) |
-
-User and password can be overridden at build time without editing the
-source — useful for producing a per-site binary:
+Requirements: Go 1.21+ and `gcc-mingw-w64-x86-64` (CGO toolchain for
+cross-compiling Fyne to Windows).
 
 ```bash
-go build -ldflags "-H windowsgui -s -w -X main.ftpUser=siteA -X main.ftpPass=strong-pass" \
+VERSION=$(git describe --tags --always --dirty 2>/dev/null || echo dev)
+
+CGO_ENABLED=1 CC=x86_64-w64-mingw32-gcc GOOS=windows GOARCH=amd64 \
+  go build \
+    -ldflags "-H windowsgui -s -w -X main.version=$VERSION" \
+    -o auto-ftp.exe .
+```
+
+- `-H windowsgui` — no console window at startup
+- `-s -w` — strip debug/symbols (lighter binary)
+- `-X main.version=$VERSION` — inject the version string; appears in the
+  GUI footer and in the first log line
+
+### Per-site credentials
+
+`ftpUser` and `ftpPass` default to `vmsync` / `vmsync` but can be
+overridden at build time, letting you produce a binary per site without
+editing the source:
+
+```bash
+go build \
+  -ldflags "-H windowsgui -s -w -X main.version=$VERSION -X main.ftpUser=siteA -X main.ftpPass=strong-secret" \
   -o auto-ftp-siteA.exe .
 ```
 
-Port, PASV range, and folder name remain compile-time constants; to
-change them, edit `main.go` and rebuild.
-
-## Build (cross-compile Linux → Windows)
-
-Requirements:
-
-- Go 1.21+
-- `gcc-mingw-w64-x86-64` (CGO required by Fyne)
-
-Command:
-
-```bash
-CGO_ENABLED=1 CC=x86_64-w64-mingw32-gcc GOOS=windows GOARCH=amd64 \
-  go build -ldflags "-H windowsgui -s -w" -o auto-ftp.exe .
-```
-
-- `-H windowsgui`: no console window at startup
-- `-s -w`: strip symbols (smaller binary)
-
-The resulting binary is ~25 MB and has no runtime dependency (fully
-static except for Windows system DLLs).
+Port, PASV range, folder name, and app name remain compile-time
+constants; edit them in `main.go` and rebuild if you need to change
+them.
 
 ## Tests
 
@@ -73,60 +69,84 @@ static except for Windows system DLLs).
 go test ./...
 ```
 
-## Deployment
+- Unit tests (`main_test.go`) cover: credential check, settings
+  construction, TLS-disabled behaviour, humanized durations, bind
+  error classification.
+- End-to-end tests (`e2e_test.go`) start a real FTP server on a
+  random loopback port and exercise it with the jlaffaye/ftp client:
+  wrong credentials rejected, successful login + upload round-trips
+  bytes correctly, path traversal is confined to the sandbox.
 
-1. Copy `auto-ftp.exe` into a folder on the host PC (e.g.
-   `C:\EasyVIEW-FTP\`)
-2. Double-click → Windows will prompt for network authorization on
-   first launch; click **Allow access** (include both public and
-   private networks)
-3. Configure EasyVIEW in the VM with the values shown on screen
+## Architecture at a glance
 
-On next Windows boot, the app relaunches automatically.
+```
+                    +---------------------+
+                    |   main()            |
+                    |   - setupLogger     |
+                    |   - singleton guard |
+                    |   - Fyne app        |
+                    +-----+---------------+
+                          |
+                          v
++-----------+    +------------------+     +-------------------+
+| fsnotify  |--> | activityTracker  |     | ftpserverlib      |
+| watcher   |    | (GUI label)      |     |   <- driver       |
++-----------+    +------------------+     |   <- afero.BasePF |
+                                          +-------------------+
+                                                  ^
+                                                  |
+                                          +-------+--------+
+                                          | heartbeat loop |
+                                          | (30s TCP dial) |
+                                          +----------------+
+```
 
-## Logs
+The Fyne GUI is wired to server state through three feedback paths:
 
-A rotating log is written to `logs/auto-ftp.log` next to the executable
-(5 MB × 3 backups, 30-day retention). It records:
+1. **Bind result** (synchronous in `main`) — sets the initial badge
+   state.
+2. **`server.Serve()` goroutine** — if it returns while the server was
+   meant to be running, the badge flips via `fyne.Do`.
+3. **Heartbeat goroutine** — dials the loopback listener every 30 s,
+   requires two consecutive failures before flipping the badge
+   (debounce), restores the online state on the first successful dial.
 
-- Server start / stop
-- Client connections (remote IP)
-- Authentication attempts (successes and failures, with attempted user)
-- FTP commands and transfers
-- Errors
+A `context.Context` cancelled by `onClose()` stops all background
+goroutines; the `stopped` atomic bool ensures `server.Stop()` runs
+exactly once.
 
-The **View logs** button in the window opens the file directly in
-Notepad — useful for remote support: *"open the View logs button and
-read me the last line."*
-
-## Security notes
+## Security posture
 
 This tool is designed for **isolated or trusted LANs only**:
 
-- **Plaintext FTP** — credentials and file contents travel unencrypted.
-  Do not expose port 2121 to a hostile network.
-- **Hardcoded weak credentials** (`vmsync` / `vmsync`) — acceptable on
-  a private LAN where only the VM connects, unacceptable on a shared
-  or public network.
-- **Port bound to `0.0.0.0`** — any host on the LAN can attempt to
-  connect. Combine with Windows Firewall rules or a dedicated
-  host-only VirtualBox network if this is a concern.
-- **Path confinement** — client writes are sandboxed to `graphiques/`
-  via `afero.BasePathFs`, preventing escape via relative paths.
+- Plaintext FTP — no TLS; credentials and file contents travel
+  unencrypted.
+- Hardcoded credentials at build time — acceptable on a private LAN
+  where only the VM connects; otherwise override per site via
+  `-ldflags -X` (see above) or switch to FTPS.
+- Port bound to `0.0.0.0` — any host on the LAN can attempt to
+  connect. Combine with Windows Firewall rules or VirtualBox
+  host-only networking if this is a concern.
+- Path confinement — client writes are sandboxed to the
+  `graphiques/` folder via `afero.BasePathFs`; end-to-end tests
+  cover this.
 
-If you need to raise the bar, the next steps would be: enable TLS
-(FTPS), replace the hardcoded password with a generated one shown on
-first run, or switch to SFTP.
+## Releases
 
-## Uninstall
+Manual release flow (until a CI pipeline is added):
 
-- Delete `auto-ftp.exe`, `graphiques/`, and `logs/`
-- Delete `%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup\auto-ftp.vbs`
+```bash
+git tag -a v0.4.0 -m "v0.4.0 — <summary>"
+git push origin v0.4.0
 
-## Stack
+# build against the tag
+VERSION=v0.4.0
+CGO_ENABLED=1 CC=x86_64-w64-mingw32-gcc GOOS=windows GOARCH=amd64 \
+  go build -ldflags "-H windowsgui -s -w -X main.version=$VERSION" \
+    -o auto-ftp.exe .
 
-- **Go 1.25** + CGO
-- [Fyne v2](https://fyne.io/) for the GUI
-- [fclairamb/ftpserverlib](https://github.com/fclairamb/ftpserverlib) for FTP
-- [spf13/afero](https://github.com/spf13/afero) as filesystem abstraction
-- [lumberjack](https://github.com/natefinch/lumberjack) for log rotation
+gh release create v0.4.0 auto-ftp.exe \
+  --target main \
+  --title "v0.4.0 — <summary>" \
+  --notes "<release notes>"
+```

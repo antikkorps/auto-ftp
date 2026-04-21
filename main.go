@@ -31,12 +31,15 @@ import (
 	"gopkg.in/natefinch/lumberjack.v2"
 )
 
-// CHANGE THESE CREDENTIALS BEFORE DEPLOYING OUTSIDE AN ISOLATED LAN.
-// Can be overridden at build time without editing source:
-//   go build -ldflags "-X main.ftpUser=foo -X main.ftpPass=bar" ...
+// Overridable at build time via ldflags -X.
+// See README / DEPLOYMENT for the full build command.
 var (
+	// CHANGE THESE CREDENTIALS BEFORE DEPLOYING OUTSIDE AN ISOLATED LAN.
 	ftpUser = "vmsync"
 	ftpPass = "vmsync"
+	// Set by the build script from `git describe`; defaults to "dev" for
+	// local non-tagged builds so support can tell them apart.
+	version = "dev"
 )
 
 const (
@@ -65,8 +68,9 @@ var (
 )
 
 type driver struct {
-	rootFs afero.Fs
-	logger *slog.Logger
+	rootFs   afero.Fs
+	logger   *slog.Logger
+	settings *ftpserver.Settings
 }
 
 func buildSettings() *ftpserver.Settings {
@@ -79,6 +83,9 @@ func buildSettings() *ftpserver.Settings {
 }
 
 func (d *driver) GetSettings() (*ftpserver.Settings, error) {
+	if d.settings != nil {
+		return d.settings, nil
+	}
 	return buildSettings(), nil
 }
 
@@ -636,12 +643,17 @@ func buildGUI(a fyne.App, graphiquesDir, logPath string, ips []string, onClose f
 	firewall.TextSize = 11
 	firewall.Alignment = fyne.TextAlignCenter
 
+	versionLabel := canvas.NewText(version, textMuted)
+	versionLabel.TextSize = 10
+	versionLabel.Alignment = fyne.TextAlignTrailing
+
 	root := container.NewVBox(
 		container.NewPadded(header),
 		errorBanner,
 		card,
 		folderCard,
 		firewall,
+		versionLabel,
 	)
 
 	w.SetContent(container.NewPadded(container.NewPadded(root)))
@@ -662,7 +674,7 @@ func main() {
 		fmt.Fprintf(os.Stderr, "cannot init logger: %v\n", err)
 		os.Exit(1)
 	}
-	logger.Info("auto-ftp starting", "port", ftpPort, "user", ftpUser, "folder", folderName)
+	logger.Info("auto-ftp starting", "version", version, "port", ftpPort, "user", ftpUser, "folder", folderName)
 
 	if !acquireSingleton(logger) {
 		logger.Warn("another instance is already running, focusing existing window")
