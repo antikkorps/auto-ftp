@@ -32,12 +32,20 @@ cleanly.
 | Setting        | Value    |
 | -------------- | -------- |
 | Port           | `2121`   |
-| User           | `vmsync` |
-| Password       | `vmsync` |
+| User           | `vmsync` (override at build time) |
+| Password       | `vmsync` (override at build time) |
 | Target folder  | `graphiques/` (next to the exe) |
 
-To change a value: edit the constants at the top of `main.go` and
-recompile.
+User and password can be overridden at build time without editing the
+source — useful for producing a per-site binary:
+
+```bash
+go build -ldflags "-H windowsgui -s -w -X main.ftpUser=siteA -X main.ftpPass=strong-pass" \
+  -o auto-ftp-siteA.exe .
+```
+
+Port, PASV range, and folder name remain compile-time constants; to
+change them, edit `main.go` and rebuild.
 
 ## Build (cross-compile Linux → Windows)
 

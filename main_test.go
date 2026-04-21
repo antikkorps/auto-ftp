@@ -5,7 +5,9 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 
 	ftpserver "github.com/fclairamb/ftpserverlib"
 )
@@ -97,6 +99,34 @@ func TestLocalIPv4s_ExcludesLoopback(t *testing.T) {
 		if ip == "127.0.0.1" {
 			t.Errorf("loopback 127.0.0.1 should not be in localIPv4s output")
 		}
+	}
+}
+
+func TestHumanizeDuration(t *testing.T) {
+	tests := []struct {
+		name string
+		d    time.Duration
+		want string
+	}{
+		{"under 10s", 3 * time.Second, "à l'instant"},
+		{"seconds", 42 * time.Second, "il y a 42s"},
+		{"minutes", 5 * time.Minute, "il y a 5 min"},
+		{"hours", 3 * time.Hour, "il y a 3h"},
+		{"days", 50 * time.Hour, "il y a 2j"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := humanizeDuration(tc.d)
+			if got != tc.want {
+				t.Errorf("got %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestHumanizeDuration_Contains(t *testing.T) {
+	if !strings.Contains(humanizeDuration(90*time.Second), "min") {
+		t.Error("1m30s should be expressed in minutes")
 	}
 }
 

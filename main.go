@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"crypto/tls"
 	"errors"
 	"fmt"
@@ -12,6 +13,8 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"fyne.io/fyne/v2"
@@ -23,13 +26,20 @@ import (
 	"fyne.io/fyne/v2/widget"
 
 	ftpserver "github.com/fclairamb/ftpserverlib"
+	"github.com/fsnotify/fsnotify"
 	"github.com/spf13/afero"
 	"gopkg.in/natefinch/lumberjack.v2"
 )
 
+// CHANGE THESE CREDENTIALS BEFORE DEPLOYING OUTSIDE AN ISOLATED LAN.
+// Can be overridden at build time without editing source:
+//   go build -ldflags "-X main.ftpUser=foo -X main.ftpPass=bar" ...
+var (
+	ftpUser = "vmsync"
+	ftpPass = "vmsync"
+)
+
 const (
-	ftpUser    = "vmsync"
-	ftpPass    = "vmsync"
 	ftpPort    = 2121
 	pasvStart  = 2122
 	pasvEnd    = 2130
@@ -240,6 +250,106 @@ func openInNotepad(path string) {
 	}
 }
 
+func humanizeDuration(d time.Duration) string {
+	switch {
+	case d < 10*time.Second:
+		return "à l'instant"
+	case d < time.Minute:
+		return fmt.Sprintf("il y a %ds", int(d.Seconds()))
+	case d < time.Hour:
+		return fmt.Sprintf("il y a %d min", int(d.Minutes()))
+	case d < 24*time.Hour:
+		return fmt.Sprintf("il y a %dh", int(d.Hours()))
+	default:
+		return fmt.Sprintf("il y a %dj", int(d.Hours()/24))
+	}
+}
+
+type activityTracker struct {
+	mu       sync.Mutex
+	lastFile string
+	lastAt   time.Time
+	label    *canvas.Text
+}
+
+func (a *activityTracker) record(name string) {
+	a.mu.Lock()
+	a.lastFile = name
+	a.lastAt = time.Now()
+	a.mu.Unlock()
+	a.redraw()
+}
+
+func (a *activityTracker) redraw() {
+	a.mu.Lock()
+	name := a.lastFile
+	at := a.lastAt
+	a.mu.Unlock()
+
+	text := "Aucun fichier reçu depuis le démarrage."
+	if !at.IsZero() {
+		text = fmt.Sprintf("Dernier fichier reçu : %s (%s)", name, humanizeDuration(time.Since(at)))
+	}
+	fyne.Do(func() {
+		a.label.Text = text
+		a.label.Refresh()
+	})
+}
+
+func watchFolder(ctx context.Context, dir string, logger *slog.Logger, onEvent func(name string)) {
+	w, err := fsnotify.NewWatcher()
+	if err != nil {
+		logger.Error("fsnotify init failed", "error", err)
+		return
+	}
+	if err := w.Add(dir); err != nil {
+		logger.Error("fsnotify add failed", "dir", dir, "error", err)
+		_ = w.Close()
+		return
+	}
+	go func() {
+		defer w.Close()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case ev, ok := <-w.Events:
+				if !ok {
+					return
+				}
+				if ev.Op&(fsnotify.Create|fsnotify.Write) != 0 {
+					onEvent(filepath.Base(ev.Name))
+				}
+			case err, ok := <-w.Errors:
+				if !ok {
+					return
+				}
+				logger.Warn("fsnotify error", "error", err)
+			}
+		}
+	}()
+}
+
+func heartbeat(ctx context.Context, addr string, logger *slog.Logger, onFail func(err error), onOK func()) {
+	t := time.NewTicker(30 * time.Second)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			conn, err := net.DialTimeout("tcp", addr, 2*time.Second)
+			if err != nil {
+				logger.Warn("heartbeat failed", "addr", addr, "error", err)
+				onFail(err)
+				continue
+			}
+			_ = conn.Close()
+			onOK()
+		}
+	}
+}
+
 func setupLogger() (*slog.Logger, string, error) {
 	dir := filepath.Join(exeDir(), logsDir)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -358,10 +468,11 @@ func makeCard(content fyne.CanvasObject) fyne.CanvasObject {
 }
 
 type gui struct {
-	window       fyne.Window
-	badge        *statusBadge
-	errorBanner  fyne.CanvasObject
-	errorDetail  *canvas.Text
+	window      fyne.Window
+	badge       *statusBadge
+	errorBanner fyne.CanvasObject
+	errorDetail *canvas.Text
+	activity    *activityTracker
 }
 
 func (g *gui) applyError(badgeText, detail string) {
@@ -374,6 +485,13 @@ func (g *gui) applyError(badgeText, detail string) {
 func (g *gui) showErrorFromGoroutine(badgeText, detail string) {
 	fyne.Do(func() {
 		g.applyError(badgeText, detail)
+	})
+}
+
+func (g *gui) restoreOnline() {
+	fyne.Do(func() {
+		g.badge.setOnline()
+		g.errorBanner.Hide()
 	})
 }
 
@@ -489,6 +607,10 @@ func buildGUI(a fyne.App, graphiquesDir, logPath string, ips []string, onClose f
 	folderValue.TextStyle = fyne.TextStyle{Monospace: true}
 	folderValue.TextSize = 12
 
+	activityLabel := canvas.NewText("Aucun fichier reçu depuis le démarrage.", textMuted)
+	activityLabel.TextSize = 12
+	activity := &activityTracker{label: activityLabel}
+
 	openBtn := widget.NewButton("Ouvrir le dossier", func() {
 		openFolder(graphiquesDir)
 	})
@@ -504,6 +626,7 @@ func buildGUI(a fyne.App, graphiquesDir, logPath string, ips []string, onClose f
 	folderCard := makeCard(container.NewVBox(
 		folderLabel,
 		folderValue,
+		activityLabel,
 		container.NewGridWithColumns(3, openBtn, logsBtn, quitBtn),
 	))
 
@@ -526,6 +649,7 @@ func buildGUI(a fyne.App, graphiquesDir, logPath string, ips []string, onClose f
 		badge:       badge,
 		errorBanner: errorBanner,
 		errorDetail: errorDetail,
+		activity:    activity,
 	}
 }
 
@@ -564,13 +688,16 @@ func main() {
 	a := app.NewWithID("com.franck.auto-ftp")
 	a.Settings().SetTheme(customTheme{})
 
-	stopped := false
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	var stopped atomic.Bool
 	onClose := func() {
-		if stopped {
+		if !stopped.CompareAndSwap(false, true) {
 			return
 		}
-		stopped = true
 		logger.Info("stopping ftp server")
+		cancel()
 		_ = server.Stop()
 	}
 	g := buildGUI(a, graphiquesDir, logPath, ips, onClose)
@@ -579,13 +706,49 @@ func main() {
 		g.applyError(shortBindError(bindErr), bindErr.Error())
 	} else {
 		go func() {
-			if err := server.Serve(); err != nil && !stopped {
+			if err := server.Serve(); err != nil && !stopped.Load() {
 				logger.Error("ftp server crashed", "error", err)
 				g.showErrorFromGoroutine("SERVEUR ARRÊTÉ", err.Error())
 			}
 		}()
+
+		go watchFolder(ctx, graphiquesDir, logger, func(name string) {
+			logger.Info("file activity", "name", name)
+			g.activity.record(name)
+		})
+
+		go func() {
+			t := time.NewTicker(30 * time.Second)
+			defer t.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-t.C:
+					g.activity.redraw()
+				}
+			}
+		}()
+
+		var hbFails atomic.Int32
+		go heartbeat(ctx, fmt.Sprintf("127.0.0.1:%d", ftpPort), logger,
+			func(err error) {
+				if stopped.Load() {
+					return
+				}
+				if hbFails.Add(1) >= 2 {
+					g.showErrorFromGoroutine("SERVEUR NE RÉPOND PLUS", err.Error())
+				}
+			},
+			func() {
+				if hbFails.Swap(0) >= 2 {
+					g.restoreOnline()
+				}
+			},
+		)
 	}
 
 	g.window.ShowAndRun()
+	cancel()
 	logger.Info("gui closed, bye")
 }
