@@ -9,3 +9,5 @@ build/bin/
 frontend/node_modules/
 frontend/dist/*
 !frontend/dist/gitkeep
+frontend/package.json.md5
+*.syso
