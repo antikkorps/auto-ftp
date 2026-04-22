@@ -3,3 +3,9 @@ auto-ftp
 *.exe
 graphiques/
 logs/
+
+# Wails build artifacts
+build/bin/
+frontend/node_modules/
+frontend/dist/*
+!frontend/dist/gitkeep
