@@ -79,7 +79,7 @@ go test ./...
 
 ## Architecture at a glance
 
-```
+```bash
                     +---------------------+
                     |   main()            |
                     |   - setupLogger     |

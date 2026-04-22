@@ -21,7 +21,9 @@ import (
 	"fyne.io/fyne/v2/app"
 	"fyne.io/fyne/v2/canvas"
 	"fyne.io/fyne/v2/container"
+	"fyne.io/fyne/v2/dialog"
 	"fyne.io/fyne/v2/layout"
+	"fyne.io/fyne/v2/storage"
 	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
 
@@ -51,6 +53,7 @@ const (
 	logFile    = "auto-ftp.log"
 	appName    = "Serveur FTP EasyVIEW"
 	startupKey = "auto-ftp.vbs"
+	configFile = "auto-ftp.cfg"
 )
 
 var (
@@ -196,6 +199,14 @@ func localIPv4s() []string {
 	return out
 }
 
+func uriToLocalPath(uri fyne.URI) string {
+	p := uri.Path()
+	if runtime.GOOS == "windows" && len(p) > 2 && p[0] == '/' && p[2] == ':' {
+		p = p[1:]
+	}
+	return filepath.FromSlash(p)
+}
+
 func exeDir() string {
 	p, err := os.Executable()
 	if err != nil {
@@ -205,7 +216,43 @@ func exeDir() string {
 	return filepath.Dir(p)
 }
 
-func ensureGraphiquesDir() (string, error) {
+func configFilePath() string {
+	return filepath.Join(exeDir(), configFile)
+}
+
+func loadConfiguredFolder() string {
+	data, err := os.ReadFile(configFilePath())
+	if err != nil {
+		return ""
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if s, ok := strings.CutPrefix(line, "folder="); ok {
+			return strings.TrimSpace(s)
+		}
+	}
+	return ""
+}
+
+func saveConfiguredFolder(path string) error {
+	return os.WriteFile(configFilePath(), []byte("folder="+path+"\r\n"), 0o644)
+}
+
+// resolveDestination returns the directory to serve via FTP.
+// When auto-ftp.cfg specifies a folder, it must already exist (we don't
+// create directories on removable media). Otherwise, the default
+// ./graphiques next to the exe is created on demand.
+func resolveDestination() (string, error) {
+	if configured := loadConfiguredFolder(); configured != "" {
+		info, err := os.Stat(configured)
+		if err != nil {
+			return configured, err
+		}
+		if !info.IsDir() {
+			return configured, fmt.Errorf("%s n'est pas un dossier", configured)
+		}
+		return configured, nil
+	}
 	d := filepath.Join(exeDir(), folderName)
 	return d, os.MkdirAll(d, 0o755)
 }
@@ -629,6 +676,30 @@ func buildGUI(a fyne.App, graphiquesDir, logPath string, ips []string, onClose f
 	logsBtn := widget.NewButton("Voir les logs", func() {
 		openInNotepad(logPath)
 	})
+	changeBtn := widget.NewButton("Changer de dossier…", func() {
+		fd := dialog.NewFolderOpen(func(uri fyne.ListableURI, err error) {
+			if err != nil || uri == nil {
+				return
+			}
+			path := uriToLocalPath(uri)
+			if path == "" {
+				return
+			}
+			if err := saveConfiguredFolder(path); err != nil {
+				dialog.ShowError(err, w)
+				return
+			}
+			dialog.ShowInformation(
+				"Dossier modifié",
+				"Nouveau dossier : "+path+"\n\nCliquez sur « Arrêter le serveur » puis relancez auto-ftp pour appliquer.",
+				w,
+			)
+		}, w)
+		if lister, err := storage.ListerForURI(storage.NewFileURI(graphiquesDir)); err == nil {
+			fd.SetLocation(lister)
+		}
+		fd.Show()
+	})
 	quitBtn := widget.NewButton("Arrêter le serveur", requestClose)
 	quitBtn.Importance = widget.WarningImportance
 
@@ -636,7 +707,7 @@ func buildGUI(a fyne.App, graphiquesDir, logPath string, ips []string, onClose f
 		folderLabel,
 		folderValue,
 		activityLabel,
-		container.NewGridWithColumns(3, openBtn, logsBtn, quitBtn),
+		container.NewGridWithColumns(2, openBtn, changeBtn, logsBtn, quitBtn),
 	))
 
 	firewall := canvas.NewText("Au 1er lancement, Windows peut demander une autorisation réseau : cliquez sur « Autoriser l'accès ».", textMuted)
@@ -677,37 +748,67 @@ func main() {
 	logger.Info("auto-ftp starting", "version", version, "port", ftpPort, "user", ftpUser, "folder", folderName)
 
 	if !acquireSingleton(logger) {
-		logger.Warn("another instance is already running, focusing existing window")
-		focusExistingWindow(appName)
-		return
+		if focusExistingWindow(appName) {
+			logger.Warn("another instance is already running, focused existing window")
+			return
+		}
+		logger.Warn("instance lock held but no visible window, attempting zombie recovery")
+		if !killZombieInstances(logger) {
+			logger.Error("zombie recovery failed — open Task Manager > Details and end every auto-ftp.exe, then relaunch")
+			return
+		}
+		if !acquireSingleton(logger) {
+			logger.Error("singleton still unavailable after zombie cleanup — open Task Manager > Details and end every auto-ftp.exe, then relaunch")
+			return
+		}
+		logger.Info("zombie instances killed, continuing with fresh start")
 	}
 
-	graphiquesDir, err := ensureGraphiquesDir()
-	if err != nil {
-		logger.Error("cannot create graphiques folder", "error", err)
-		os.Exit(1)
+	graphiquesDir, destErr := resolveDestination()
+	if destErr != nil {
+		logger.Error("destination folder unavailable", "path", graphiquesDir, "error", destErr)
+	} else {
+		logger.Info("folder ready", "path", graphiquesDir)
 	}
-	logger.Info("folder ready", "path", graphiquesDir)
 
 	ensureAutostart()
 
 	ips := localIPv4s()
 	logger.Info("local ips detected", "ips", ips)
 
-	rootFs := afero.NewBasePathFs(afero.NewOsFs(), graphiquesDir)
-	drv := &driver{rootFs: rootFs, logger: logger}
-	server := ftpserver.NewFtpServer(drv)
-	server.Logger = logger
+	var server *ftpserver.FtpServer
+	var bindErr error
+	if destErr == nil {
+		rootFs := afero.NewBasePathFs(afero.NewOsFs(), graphiquesDir)
+		drv := &driver{rootFs: rootFs, logger: logger}
+		server = ftpserver.NewFtpServer(drv)
+		server.Logger = logger
 
-	bindErr := server.Listen()
-	if bindErr != nil {
-		logger.Error("ftp server bind failed", "error", bindErr)
-	} else {
-		logger.Info("ftp server listening", "addr", fmt.Sprintf("0.0.0.0:%d", ftpPort))
+		bindErr = server.Listen()
+		if bindErr != nil {
+			logger.Error("ftp server bind failed", "error", bindErr)
+		} else {
+			logger.Info("ftp server listening", "addr", fmt.Sprintf("0.0.0.0:%d", ftpPort))
+		}
 	}
 
+	// Startup watchdog: if the UI doesn't reach the Fyne main loop within
+	// 15s, force-exit. Otherwise a silent Fyne init hang leaves us as a
+	// zombie holding the mutex and port 2121 — see the 2026-04 incident.
+	var uiAlive atomic.Bool
+	go func() {
+		time.Sleep(15 * time.Second)
+		if !uiAlive.Load() {
+			logger.Error("UI failed to start within 15s, exiting to avoid zombie")
+			os.Exit(2)
+		}
+	}()
+
+	logger.Info("fyne: NewWithID starting")
 	a := app.NewWithID("com.franck.auto-ftp")
+	logger.Info("fyne: NewWithID done")
 	a.Settings().SetTheme(customTheme{})
+	logger.Info("fyne: theme applied")
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -719,13 +820,20 @@ func main() {
 		}
 		logger.Info("stopping ftp server")
 		cancel()
-		_ = server.Stop()
+		if server != nil {
+			_ = server.Stop()
+		}
 	}
+	logger.Info("fyne: building GUI")
 	g := buildGUI(a, graphiquesDir, logPath, ips, onClose)
+	logger.Info("fyne: GUI built")
 
-	if bindErr != nil {
+	switch {
+	case destErr != nil:
+		g.applyError("DOSSIER INTROUVABLE", destErr.Error())
+	case bindErr != nil:
 		g.applyError(shortBindError(bindErr), bindErr.Error())
-	} else {
+	default:
 		go func() {
 			if err := server.Serve(); err != nil && !stopped.Load() {
 				logger.Error("ftp server crashed", "error", err)
@@ -769,6 +877,16 @@ func main() {
 		)
 	}
 
+	// Queued on the main UI thread; only fires once the Fyne event loop is
+	// actually processing, which cancels the startup watchdog above.
+	go func() {
+		fyne.Do(func() {
+			uiAlive.Store(true)
+			logger.Info("fyne: main loop running")
+		})
+	}()
+
+	logger.Info("fyne: ShowAndRun")
 	g.window.ShowAndRun()
 	cancel()
 	logger.Info("gui closed, bye")
