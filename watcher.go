@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"fmt"
 	"log/slog"
@@ -88,14 +89,38 @@ func heartbeat(ctx context.Context, addr string, logger *slog.Logger, onFail fun
 		case <-ctx.Done():
 			return
 		case <-t.C:
-			conn, err := net.DialTimeout("tcp", addr, 2*time.Second)
-			if err != nil {
+			if err := ftpPing(addr, 2*time.Second); err != nil {
 				logger.Warn("heartbeat failed", "addr", addr, "error", err)
 				onFail(err)
 				continue
 			}
-			_ = conn.Close()
 			onOK()
 		}
 	}
+}
+
+// ftpPing opens a TCP connection and completes a banner/QUIT exchange
+// so ftpserverlib records a clean client lifecycle. A plain Dial+Close
+// was enough to prove the listener is alive but ftpserverlib would
+// then log the abrupt disconnect at ERROR level every 30 s.
+func ftpPing(addr string, timeout time.Duration) error {
+	conn, err := net.DialTimeout("tcp", addr, timeout)
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+	if err := conn.SetDeadline(time.Now().Add(timeout)); err != nil {
+		return err
+	}
+	br := bufio.NewReader(conn)
+	if _, err := br.ReadString('\n'); err != nil {
+		return err
+	}
+	if _, err := conn.Write([]byte("QUIT\r\n")); err != nil {
+		return err
+	}
+	if _, err := br.ReadString('\n'); err != nil {
+		return err
+	}
+	return nil
 }

@@ -62,6 +62,13 @@ func startTestServer(t *testing.T, rootDir string) string {
 	return ""
 }
 
+func TestE2E_FtpPingCleanHandshake(t *testing.T) {
+	addr := startTestServer(t, t.TempDir())
+	if err := ftpPing(addr, 2*time.Second); err != nil {
+		t.Fatalf("ftpPing: %v", err)
+	}
+}
+
 func TestE2E_WrongCredentials(t *testing.T) {
 	addr := startTestServer(t, t.TempDir())
 
