@@ -13,7 +13,10 @@ extending the tool.
 ## Stack
 
 - **Go** (currently 1.25) + CGO
-- [Fyne v2](https://fyne.io/) for the GUI
+- [Wails v2](https://wails.io/) — Go backend + WebView2-hosted HTML/JS
+  frontend. Requires the Microsoft WebView2 Runtime on the target
+  Windows machine (preinstalled on Win10 ≥ 21H2 and Win11; see
+  `DEPLOYMENT.md` for legacy hosts)
 - [fclairamb/ftpserverlib](https://github.com/fclairamb/ftpserverlib) for the FTP server
 - [spf13/afero](https://github.com/spf13/afero) for filesystem abstraction and path sandboxing
 - [fsnotify/fsnotify](https://github.com/fsnotify/fsnotify) for activity detection
@@ -22,9 +25,20 @@ extending the tool.
 
 ## Source layout
 
-- `main.go` — everything cross-platform: config, driver, GUI, main loop
-- `singleton_windows.go` — Windows-only named mutex + window focus (build tag `windows`)
+- `main.go` — entry point: logger, Win32 singleton pregate, `wails.Run`
+- `app.go` — `App` type bound to the Wails frontend: FTP lifecycle
+  (`OnStartup`/`OnBeforeClose`), state snapshot, JS-callable methods
+  (`GetState`, `ChangeFolder`, `OpenFolder`, `OpenLogs`, `QuitApp`),
+  runtime event emission (`activity`, `status`)
+- `ftp.go` — ftpserverlib driver: settings, auth, sandboxed FS, bind-error classification
+- `config.go` — paths helper (`exeDir`, `dataDir` → `./af-data/`),
+  `auto-ftp.cfg` load/save, lumberjack logger setup, Windows autostart VBS
+- `watcher.go` — fsnotify watcher and heartbeat TCP dial goroutines
+- `singleton_windows.go` — Win32 `CreateMutexW` pregate + `FindWindowW` refocus (build tag `windows`)
 - `singleton_other.go` — no-op stubs for other OSes (build tag `!windows`)
+- `frontend/` — Wails frontend (plain HTML/CSS + a single `main.js` module bundled by Vite)
+  - `index.html`, `src/style.css`, `src/main.js` — the entire UI
+  - `wailsjs/` — auto-generated JS bindings for Go methods, do not edit
 - `main_test.go` — unit tests for pure helpers
 - `e2e_test.go` — end-to-end tests spinning up a real FTP server on 127.0.0.1
 
@@ -58,14 +72,16 @@ overridden at build time, letting you produce a binary per site without
 editing the source:
 
 ```bash
-go build \
-  -ldflags "-H windowsgui -s -w -X main.version=$VERSION -X main.ftpUser=siteA -X main.ftpPass=strong-secret" \
-  -o auto-ftp-siteA.exe .
+CGO_ENABLED=1 CC=x86_64-w64-mingw32-gcc \
+  wails build -platform windows/amd64 \
+    -ldflags "-X main.version=$(git describe --tags --always --dirty) -X main.ftpUser=siteA -X main.ftpPass=strong-secret" \
+    -nsis=false
 ```
 
-Port, PASV range, folder name, and app name remain compile-time
-constants; edit them in `main.go` and rebuild if you need to change
-them.
+Rename `build/bin/auto-ftp.exe` per site if you produce several
+variants. Port, PASV range, folder name, and app name remain
+compile-time constants; edit them in `ftp.go` / `main.go` and rebuild
+if you need to change them.
 
 ## Tests
 
@@ -84,40 +100,50 @@ go test ./...
 ## Architecture at a glance
 
 ```bash
-                    +---------------------+
-                    |   main()            |
-                    |   - setupLogger     |
-                    |   - singleton guard |
-                    |   - Fyne app        |
-                    +-----+---------------+
-                          |
-                          v
-+-----------+    +------------------+     +-------------------+
-| fsnotify  |--> | activityTracker  |     | ftpserverlib      |
-| watcher   |    | (GUI label)      |     |   <- driver       |
-+-----------+    +------------------+     |   <- afero.BasePF |
-                                          +-------------------+
-                                                  ^
-                                                  |
-                                          +-------+--------+
-                                          | heartbeat loop |
-                                          | (30s TCP dial) |
-                                          +----------------+
+                +------------------------------+
+                |   main()                     |
+                |   - setupLogger              |
+                |   - Win32 singleton pregate  |
+                |   - wails.Run(App{...})      |
+                +-------+----------------------+
+                        |
+                        v
+          +-----------------------------+
+          | Wails runtime (WebView2)    |
+          | <-> frontend/src/main.js    |
+          +-------------+---------------+
+                        | OnStartup
+                        v
+          +-----------------------------+
+          | App (app.go)                |
+          |   - bound methods (GetState,|
+          |     ChangeFolder, QuitApp…) |
+          |   - EventsEmit(activity,    |
+          |     status)                 |
+          +-+---------+-----------+-----+
+            |         |           |
+            v         v           v
+     +-----------+  +------+  +-------------------+
+     | fsnotify  |  | hbt  |  | ftpserverlib      |
+     | watcher   |  | 30 s |  |   <- driver       |
+     +-----------+  +------+  |   <- afero.BasePF |
+                              +-------------------+
 ```
 
-The Fyne GUI is wired to server state through three feedback paths:
+The WebView2 frontend is wired to server state through two paths:
 
-1. **Bind result** (synchronous in `main`) — sets the initial badge
-   state.
-2. **`server.Serve()` goroutine** — if it returns while the server was
-   meant to be running, the badge flips via `fyne.Do`.
-3. **Heartbeat goroutine** — dials the loopback listener every 30 s,
+1. **Bound method `GetState()`** — synchronous pull the frontend does
+   at load to render initial badge, IPs, folder, last-file label.
+2. **`wailsruntime.EventsEmit`** — push updates for `activity` (file
+   landed in the watched folder) and `status` (online/offline flips).
+   The heartbeat goroutine dials the loopback listener every 30 s and
    requires two consecutive failures before flipping the badge
-   (debounce), restores the online state on the first successful dial.
+   (debounce); first success restores it.
 
-A `context.Context` cancelled by `onClose()` stops all background
-goroutines; the `stopped` atomic bool ensures `server.Stop()` runs
-exactly once.
+A `context.Context` is cancelled by `App.shutdown()` (called from
+`OnBeforeClose` or from the frontend's `QuitApp`) and stops all
+background goroutines. The `stopped` atomic bool ensures
+`server.Stop()` runs exactly once even if both paths fire.
 
 ## Security posture
 
@@ -140,8 +166,8 @@ This tool is designed for **isolated or trusted LANs only**:
 Manual release flow (until a CI pipeline is added):
 
 ```bash
-git tag -a v0.4.0 -m "v0.4.0 — <summary>"
-git push origin v0.4.0
+git tag -a v0.5.0 -m "v0.5.0 — <summary>"
+git push origin v0.5.0
 
 # build against the tag
 CGO_ENABLED=1 CC=x86_64-w64-mingw32-gcc \
@@ -149,8 +175,8 @@ CGO_ENABLED=1 CC=x86_64-w64-mingw32-gcc \
     -ldflags "-X main.version=$(git describe --tags --always --dirty)" \
     -nsis=false
 
-gh release create v0.4.0 build/bin/auto-ftp.exe \
+gh release create v0.5.0 build/bin/auto-ftp.exe \
   --target main \
-  --title "v0.4.0 — <summary>" \
+  --title "v0.5.0 — <summary>" \
   --notes "<release notes>"
 ```
