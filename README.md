@@ -30,22 +30,26 @@ extending the tool.
 
 ## Build
 
-Requirements: Go 1.21+ and `gcc-mingw-w64-x86-64` (CGO toolchain for
-cross-compiling Fyne to Windows).
+Requirements: Go 1.21+, `gcc-mingw-w64-x86-64` (CGO toolchain for
+cross-compiling to Windows), Node.js (for the Wails frontend bundler),
+and the [Wails v2 CLI](https://wails.io/docs/gettingstarted/installation)
+(`go install github.com/wailsapp/wails/v2/cmd/wails@latest`).
+
+Run from the repo root:
 
 ```bash
-VERSION=$(git describe --tags --always --dirty 2>/dev/null || echo dev)
-
-CGO_ENABLED=1 CC=x86_64-w64-mingw32-gcc GOOS=windows GOARCH=amd64 \
-  go build \
-    -ldflags "-H windowsgui -s -w -X main.version=$VERSION" \
-    -o auto-ftp.exe .
+CGO_ENABLED=1 CC=x86_64-w64-mingw32-gcc \
+  wails build -platform windows/amd64 \
+    -ldflags "-X main.version=$(git describe --tags --always --dirty)" \
+    -nsis=false
 ```
 
-- `-H windowsgui` — no console window at startup
-- `-s -w` — strip debug/symbols (lighter binary)
-- `-X main.version=$VERSION` — inject the version string; appears in the
-  GUI footer and in the first log line
+Output: `build/bin/auto-ftp.exe`.
+
+- `-platform windows/amd64` — cross-compile target
+- `-ldflags -X main.version=…` — inject the version string; appears in
+  the GUI footer and in the first log line
+- `-nsis=false` — skip the NSIS installer build (we ship the raw `.exe`)
 
 ### Per-site credentials
 
@@ -140,12 +144,12 @@ git tag -a v0.4.0 -m "v0.4.0 — <summary>"
 git push origin v0.4.0
 
 # build against the tag
-VERSION=v0.4.0
-CGO_ENABLED=1 CC=x86_64-w64-mingw32-gcc GOOS=windows GOARCH=amd64 \
-  go build -ldflags "-H windowsgui -s -w -X main.version=$VERSION" \
-    -o auto-ftp.exe .
+CGO_ENABLED=1 CC=x86_64-w64-mingw32-gcc \
+  wails build -platform windows/amd64 \
+    -ldflags "-X main.version=$(git describe --tags --always --dirty)" \
+    -nsis=false
 
-gh release create v0.4.0 auto-ftp.exe \
+gh release create v0.4.0 build/bin/auto-ftp.exe \
   --target main \
   --title "v0.4.0 — <summary>" \
   --notes "<release notes>"

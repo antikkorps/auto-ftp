@@ -38,14 +38,24 @@ func main() {
 	}
 	logger.Info("auto-ftp starting", "version", version, "port", ftpPort, "user", ftpUser)
 
+	// Pre-gate run before wails.Run to close a race in Wails'
+	// SingleInstanceLock (its mutex is registered inside wails.Run, so
+	// two fast relaunches can both slip past it). Wails' lock is kept
+	// below as a second line of defence.
+	if !acquireSingleton(logger, singleInstanceID+"-pregate") {
+		logger.Info("another instance already running, focusing its window and exiting")
+		focusExistingWindow(appName)
+		return
+	}
+
 	app := NewApp(logger, logPath)
 
 	err = wails.Run(&options.App{
 		Title:            appName,
 		Width:            720,
-		Height:           760,
+		Height:           820,
 		MinWidth:         620,
-		MinHeight:        600,
+		MinHeight:        640,
 		BackgroundColour: &options.RGBA{R: 0xfb, G: 0xfd, B: 0xff, A: 1},
 		AssetServer:      &assetserver.Options{Assets: assets},
 		SingleInstanceLock: &options.SingleInstanceLock{
