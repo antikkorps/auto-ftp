@@ -14,11 +14,13 @@ import (
 )
 
 const (
-	folderName = "graphiques"
-	logsDir    = "logs"
-	logFile    = "auto-ftp.log"
-	startupKey = "auto-ftp.vbs"
-	configFile = "auto-ftp.cfg"
+	folderName  = "graphiques"
+	dataDirName = "af-data"
+	logsDir     = "logs"
+	webviewDir  = "webview"
+	logFile     = "auto-ftp.log"
+	startupKey  = "auto-ftp.vbs"
+	configFile  = "auto-ftp.cfg"
 )
 
 func exeDir() string {
@@ -30,8 +32,16 @@ func exeDir() string {
 	return filepath.Dir(p)
 }
 
+// dataDir is the opaque internal state directory next to the exe:
+// app config, rotated logs, and WebView2 user data all live here.
+// The user-facing graphiques/ folder intentionally stays at the top
+// level so operators can find received files without spelunking.
+func dataDir() string {
+	return filepath.Join(exeDir(), dataDirName)
+}
+
 func configFilePath() string {
-	return filepath.Join(exeDir(), configFile)
+	return filepath.Join(dataDir(), configFile)
 }
 
 func loadConfiguredFolder() string {
@@ -39,7 +49,7 @@ func loadConfiguredFolder() string {
 	if err != nil {
 		return ""
 	}
-	for _, line := range strings.Split(string(data), "\n") {
+	for line := range strings.SplitSeq(string(data), "\n") {
 		line = strings.TrimSpace(line)
 		if s, ok := strings.CutPrefix(line, "folder="); ok {
 			return strings.TrimSpace(s)
@@ -49,6 +59,9 @@ func loadConfiguredFolder() string {
 }
 
 func saveConfiguredFolder(path string) error {
+	if err := os.MkdirAll(dataDir(), 0o755); err != nil {
+		return err
+	}
 	return os.WriteFile(configFilePath(), []byte("folder="+path+"\r\n"), 0o644)
 }
 
@@ -145,7 +158,7 @@ func openInNotepad(path string) {
 }
 
 func setupLogger() (*slog.Logger, string, error) {
-	dir := filepath.Join(exeDir(), logsDir)
+	dir := filepath.Join(dataDir(), logsDir)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, "", err
 	}
