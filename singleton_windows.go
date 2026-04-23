@@ -3,12 +3,7 @@
 package main
 
 import (
-	"fmt"
 	"log/slog"
-	"os"
-	"os/exec"
-	"path/filepath"
-	"strings"
 	"syscall"
 	"time"
 	"unsafe"
@@ -27,23 +22,32 @@ var (
 const (
 	errorAlreadyExists = 183
 	swRestore          = 9
-	createNoWindow     = 0x08000000
 )
 
+// Held for the whole process lifetime; Windows releases the named mutex
+// automatically on process exit.
 var mutexHandle uintptr
 
-func acquireSingleton(logger *slog.Logger) bool {
-	name, _ := syscall.UTF16PtrFromString("AutoFTP-EasyVIEW-v1")
-	h, _, lastErr := procCreateMutexW.Call(0, 0, uintptr(unsafe.Pointer(name)))
+// acquireSingleton returns true if we obtained the named mutex, false
+// if another instance already holds it. This runs before wails.Run and
+// closes a race in Wails' own SingleInstanceLock: Wails registers its
+// mutex inside wails.Run, so two fast relaunches can both get past it
+// before either has finished initializing. CreateMutexW is atomic at
+// the Win32 level so this pre-gate is race-free.
+func acquireSingleton(logger *slog.Logger, id string) bool {
+	namePtr, err := syscall.UTF16PtrFromString(id)
+	if err != nil {
+		logger.Warn("mutex name encoding failed, skipping singleton guard", "error", err)
+		return true
+	}
+	h, _, lastErr := procCreateMutexW.Call(0, 0, uintptr(unsafe.Pointer(namePtr)))
 	if h == 0 {
-		logger.Warn("CreateMutexW failed, skipping singleton check", "error", lastErr)
+		logger.Warn("CreateMutexW returned null, skipping singleton guard", "error", lastErr)
 		return true
 	}
 	if errno, ok := lastErr.(syscall.Errno); ok && errno == errorAlreadyExists {
-		// CreateMutexW still returns a valid handle when the mutex already
-		// exists. If we leave it open, our own handle keeps the named mutex
-		// alive — and a retry after killing zombies will also see
-		// ERROR_ALREADY_EXISTS, defeating the whole recovery.
+		// Leaving our own handle open would keep the mutex alive after
+		// we exit, so the next legit launch would also see ERROR_ALREADY_EXISTS.
 		procCloseHandle.Call(h)
 		return false
 	}
@@ -51,45 +55,25 @@ func acquireSingleton(logger *slog.Logger) bool {
 	return true
 }
 
+// focusExistingWindow tries to bring a window with the given title to
+// the foreground, polling briefly because the racing first instance may
+// still be creating its window when we run.
 func focusExistingWindow(title string) bool {
 	titlePtr, err := syscall.UTF16PtrFromString(title)
 	if err != nil {
 		return false
 	}
-	hwnd, _, _ := procFindWindowW.Call(0, uintptr(unsafe.Pointer(titlePtr)))
-	if hwnd == 0 {
-		return false
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		hwnd, _, _ := procFindWindowW.Call(0, uintptr(unsafe.Pointer(titlePtr)))
+		if hwnd != 0 {
+			procShowWindow.Call(hwnd, swRestore)
+			procSetForegroundWindow.Call(hwnd)
+			return true
+		}
+		if time.Now().After(deadline) {
+			return false
+		}
+		time.Sleep(150 * time.Millisecond)
 	}
-	procShowWindow.Call(hwnd, swRestore)
-	procSetForegroundWindow.Call(hwnd)
-	return true
-}
-
-// killZombieInstances terminates every auto-ftp.exe on this machine except
-// our own PID. Named mutexes are refcounted across handles, so a single
-// stray zombie keeps the lock held — we kill them all in one shot via
-// taskkill and let the caller retry acquireSingleton afterwards.
-func killZombieInstances(logger *slog.Logger) bool {
-	exePath, err := os.Executable()
-	if err != nil {
-		logger.Warn("cannot determine executable path", "error", err)
-		return false
-	}
-	exeName := filepath.Base(exePath)
-	cmd := exec.Command(
-		"taskkill", "/F", "/T",
-		"/IM", exeName,
-		"/FI", fmt.Sprintf("PID ne %d", os.Getpid()),
-	)
-	cmd.SysProcAttr = &syscall.SysProcAttr{CreationFlags: createNoWindow}
-	out, err := cmd.CombinedOutput()
-	outStr := strings.TrimSpace(string(out))
-	if err != nil {
-		logger.Warn("taskkill failed", "exe", exeName, "out", outStr, "error", err)
-		return false
-	}
-	logger.Info("taskkill done", "exe", exeName, "out", outStr)
-	// Give Windows a moment to release the named mutex and TCP port.
-	time.Sleep(1 * time.Second)
-	return true
 }

@@ -1,0 +1,334 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Preview — Serveur FTP EasyVIEW</title>
+<style>
+  :root {
+    --bg-top: #fbfdff;
+    --bg-bottom: #eef2f7;
+    --card-bg: #ffffff;
+    --card-border: #e4e9f0;
+    --card-shadow: 0 1px 2px rgba(15, 23, 42, 0.04), 0 4px 16px rgba(15, 23, 42, 0.05);
+    --text-dark: #0f172a;
+    --text-muted: #64748b;
+    --text-soft: #94a3b8;
+    --accent: #10b981;
+    --accent-soft: #ecfdf5;
+    --accent-border: #a7f3d0;
+    --danger: #ef4444;
+    --danger-soft: #fef2f2;
+    --danger-border: #fecaca;
+    --focus-ring: rgba(16, 185, 129, 0.25);
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0;
+    padding: 0;
+    height: 100%;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI Variable", "Segoe UI", Inter, system-ui, sans-serif;
+    color: var(--text-dark);
+    font-size: 14px;
+    line-height: 1.45;
+    -webkit-font-smoothing: antialiased;
+  }
+  body {
+    background: linear-gradient(180deg, var(--bg-top) 0%, var(--bg-bottom) 100%);
+    min-height: 100vh;
+    padding: 28px 32px 40px;
+  }
+  .shell {
+    max-width: 620px;
+    margin: 0 auto;
+  }
+
+  /* Header */
+  .header { text-align: center; margin-bottom: 14px; }
+  .title { font-size: 26px; font-weight: 700; letter-spacing: -0.01em; margin: 0 0 6px; }
+  .subtitle { color: var(--text-muted); font-size: 13px; margin: 0 0 18px; }
+
+  .status-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 14px;
+    border-radius: 999px;
+    font-size: 12px;
+    font-weight: 700;
+    letter-spacing: 0.04em;
+    background: var(--accent-soft);
+    border: 1px solid var(--accent-border);
+    color: var(--accent);
+  }
+  .status-pill .dot {
+    width: 8px; height: 8px; border-radius: 50%; background: var(--accent);
+    box-shadow: 0 0 0 0 rgba(16, 185, 129, 0.5);
+    animation: pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+  }
+  @keyframes pulse {
+    0%   { box-shadow: 0 0 0 0 rgba(16, 185, 129, 0.5); }
+    70%  { box-shadow: 0 0 0 8px rgba(16, 185, 129, 0); }
+    100% { box-shadow: 0 0 0 0 rgba(16, 185, 129, 0); }
+  }
+  body.state-error .status-pill { background: var(--danger-soft); border-color: var(--danger-border); color: var(--danger); }
+  body.state-error .status-pill .dot { background: var(--danger); animation: none; }
+
+  /* Error banner */
+  .error-banner {
+    margin: 16px 0 0;
+    padding: 14px 16px;
+    border-radius: 10px;
+    background: var(--danger-soft);
+    border: 1px solid var(--danger-border);
+    display: none;
+  }
+  body.state-error .error-banner { display: block; }
+  .error-title { font-weight: 700; color: var(--danger); font-size: 13px; margin: 0 0 4px; }
+  .error-detail { font-size: 12px; color: var(--text-dark); margin: 0 0 4px; word-break: break-word; }
+  .error-hint { font-size: 11px; color: var(--text-muted); margin: 0; }
+
+  /* Cards */
+  .card {
+    background: var(--card-bg);
+    border: 1px solid var(--card-border);
+    border-radius: 14px;
+    box-shadow: var(--card-shadow);
+    padding: 20px 22px;
+    margin-top: 16px;
+  }
+  .card-title { font-weight: 700; font-size: 15px; margin: 0 0 4px; }
+  .card-sep { height: 1px; background: var(--card-border); margin: 12px -22px 14px; }
+
+  /* Credentials grid */
+  .rows { display: grid; grid-template-columns: 108px 1fr auto; gap: 8px 14px; align-items: center; }
+  .row-label { font-size: 12px; font-weight: 600; color: var(--text-muted); letter-spacing: 0.01em; }
+  .row-value {
+    font-family: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+    font-weight: 600; font-size: 15px; color: var(--text-dark);
+    padding: 6px 10px; background: #f8fafc; border: 1px solid var(--card-border);
+    border-radius: 8px; word-break: break-all;
+  }
+  .btn-copy {
+    border: 1px solid var(--card-border); background: var(--card-bg); color: var(--text-muted);
+    width: 36px; height: 36px; border-radius: 8px; cursor: pointer;
+    display: inline-flex; align-items: center; justify-content: center;
+    transition: all 120ms ease;
+  }
+  .btn-copy:hover { border-color: var(--text-soft); color: var(--text-dark); }
+  .btn-copy:focus-visible { outline: none; box-shadow: 0 0 0 3px var(--focus-ring); }
+  .btn-copy.ok { background: var(--accent-soft); border-color: var(--accent-border); color: var(--accent); }
+  .btn-copy svg { width: 16px; height: 16px; }
+
+  .ip-hint { margin-top: 10px; font-size: 12px; color: var(--text-muted); font-style: italic; }
+
+  /* Folder card */
+  .folder-label { font-size: 12px; font-weight: 600; color: var(--text-muted); }
+  .folder-path {
+    font-family: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+    font-size: 12px; color: var(--text-dark);
+    margin-top: 4px; word-break: break-all;
+  }
+  .activity { margin-top: 14px; font-size: 13px; color: var(--text-muted); }
+  .activity .name { color: var(--text-dark); font-weight: 600; }
+  .activity.flash { animation: flash 800ms ease; }
+  @keyframes flash {
+    0%   { background: rgba(16, 185, 129, 0.12); }
+    100% { background: transparent; }
+  }
+
+  .actions {
+    margin-top: 18px;
+    display: grid; grid-template-columns: 1fr 1fr; gap: 10px;
+  }
+  .btn {
+    border: 1px solid var(--card-border);
+    background: var(--card-bg);
+    color: var(--text-dark);
+    font: inherit; font-weight: 600; font-size: 13px;
+    padding: 10px 14px; border-radius: 10px; cursor: pointer;
+    transition: all 120ms ease;
+  }
+  .btn:hover { border-color: var(--text-soft); background: #fbfcfe; }
+  .btn:focus-visible { outline: none; box-shadow: 0 0 0 3px var(--focus-ring); border-color: var(--accent); }
+  .btn-danger { color: var(--danger); border-color: #fecaca; }
+  .btn-danger:hover { background: var(--danger-soft); border-color: #fca5a5; }
+
+  /* Footer */
+  .firewall-note {
+    margin-top: 18px; font-size: 11px; color: var(--text-muted); text-align: center; padding: 0 20px;
+  }
+  .version { margin-top: 10px; font-size: 10px; color: var(--text-soft); text-align: right; }
+
+  /* Toast */
+  .toast {
+    position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%) translateY(10px);
+    background: var(--text-dark); color: #fff; font-size: 12px; font-weight: 600;
+    padding: 8px 14px; border-radius: 999px; opacity: 0; transition: all 180ms ease;
+    pointer-events: none;
+  }
+  .toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+
+  /* Dev-only state switcher (REMOVE in real build) */
+  .dev-switcher {
+    position: fixed; top: 10px; right: 10px;
+    background: #fff; border: 1px solid var(--card-border); border-radius: 8px;
+    padding: 6px; display: flex; gap: 4px; font-size: 11px;
+    box-shadow: var(--card-shadow);
+  }
+  .dev-switcher button {
+    border: none; background: transparent; padding: 4px 8px; border-radius: 6px; cursor: pointer;
+    font-size: 11px; font-weight: 600; color: var(--text-muted);
+  }
+  .dev-switcher button.active { background: var(--text-dark); color: #fff; }
+</style>
+</head>
+<body class="state-online">
+
+<div class="dev-switcher" title="Preview uniquement — sera retiré du build final">
+  <button id="s-ok"    class="active">OK</button>
+  <button id="s-port">Port pris</button>
+  <button id="s-folder">Dossier manquant</button>
+  <button id="s-down">Serveur KO</button>
+</div>
+
+<div class="shell">
+  <div class="header">
+    <h1 class="title">Serveur FTP EasyVIEW</h1>
+    <p class="subtitle">Laissez cette fenêtre ouverte pendant l'utilisation d'EasyVIEW.</p>
+    <span class="status-pill" id="pill">
+      <span class="dot"></span>
+      <span id="pill-label">SERVEUR EN LIGNE</span>
+    </span>
+  </div>
+
+  <div class="error-banner" id="banner">
+    <p class="error-title" id="err-title">Le serveur FTP n'a pas pu démarrer</p>
+    <p class="error-detail" id="err-detail">listen tcp 0.0.0.0:2121: bind: address already in use</p>
+    <p class="error-hint">Ouvrez « Voir les logs » et contactez le support en leur lisant le message ci-dessus.</p>
+  </div>
+
+  <div class="card">
+    <p class="card-title">À renseigner dans EasyVIEW (dans la VM)</p>
+    <div class="card-sep"></div>
+    <div class="rows" id="rows">
+      <div class="row-label">Adresses IP</div>
+      <div class="row-value">192.168.72.102</div>
+      <button class="btn-copy" data-copy="192.168.72.102" aria-label="Copier 192.168.72.102">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+      </button>
+
+      <div class="row-label"></div>
+      <div class="row-value">172.19.64.1</div>
+      <button class="btn-copy" data-copy="172.19.64.1" aria-label="Copier 172.19.64.1">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+      </button>
+
+      <div class="row-label">Port</div>
+      <div class="row-value">2121</div>
+      <button class="btn-copy" data-copy="2121" aria-label="Copier 2121">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+      </button>
+
+      <div class="row-label">Utilisateur</div>
+      <div class="row-value">vmsync</div>
+      <button class="btn-copy" data-copy="vmsync" aria-label="Copier vmsync">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+      </button>
+
+      <div class="row-label">Mot de passe</div>
+      <div class="row-value">vmsync</div>
+      <button class="btn-copy" data-copy="vmsync" aria-label="Copier vmsync">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+      </button>
+    </div>
+    <p class="ip-hint">Si la première adresse ne fonctionne pas, essayez les suivantes.</p>
+  </div>
+
+  <div class="card">
+    <p class="folder-label">Dossier de réception</p>
+    <p class="folder-path" id="folder-path">C:\Users\franck.vienot\Downloads\graphiques</p>
+    <p class="activity" id="activity">
+      Dernier fichier reçu : <span class="name">rapport-2026-04-22.pdf</span> (à l'instant)
+    </p>
+    <div class="actions">
+      <button class="btn" id="btn-open">Ouvrir le dossier</button>
+      <button class="btn" id="btn-change">Changer de dossier…</button>
+      <button class="btn" id="btn-logs">Voir les logs</button>
+      <button class="btn btn-danger" id="btn-quit">Arrêter le serveur</button>
+    </div>
+  </div>
+
+  <p class="firewall-note">Au 1er lancement, Windows peut demander une autorisation réseau : cliquez sur « Autoriser l'accès ».</p>
+  <p class="version">v0.4.0-dirty</p>
+</div>
+
+<div class="toast" id="toast">Copié</div>
+
+<script>
+  // Copy buttons — real clipboard, same feedback the final UI will have
+  const toast = document.getElementById('toast');
+  let toastTimer = null;
+  function showToast(msg) {
+    toast.textContent = msg;
+    toast.classList.add('show');
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => toast.classList.remove('show'), 1400);
+  }
+  document.querySelectorAll('.btn-copy').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      const v = btn.dataset.copy;
+      try {
+        await navigator.clipboard.writeText(v);
+        btn.classList.add('ok');
+        btn.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>';
+        showToast('Copié : ' + v);
+        setTimeout(() => {
+          btn.classList.remove('ok');
+          btn.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>';
+        }, 1400);
+      } catch (e) {
+        showToast('Copie échouée');
+      }
+    });
+  });
+
+  // Dev-only state switcher
+  const pill = document.getElementById('pill-label');
+  const errTitle = document.getElementById('err-title');
+  const errDetail = document.getElementById('err-detail');
+  const states = {
+    'ok':     { cls: 'state-online', pill: 'SERVEUR EN LIGNE', title: '', detail: '' },
+    'port':   { cls: 'state-error',  pill: 'PORT 2121 DÉJÀ UTILISÉ', title: "Le serveur FTP n'a pas pu démarrer", detail: 'listen tcp 0.0.0.0:2121: bind: address already in use' },
+    'folder': { cls: 'state-error',  pill: 'DOSSIER INTROUVABLE',    title: "Le serveur FTP n'a pas pu démarrer", detail: "stat D:\\usb-key\\graphiques: The system cannot find the path specified." },
+    'down':   { cls: 'state-error',  pill: 'SERVEUR NE RÉPOND PLUS', title: "Le serveur FTP n'a pas pu démarrer", detail: 'heartbeat: dial tcp 127.0.0.1:2121: connectex: No connection could be made because the target machine actively refused it.' },
+  };
+  function setState(key) {
+    const s = states[key];
+    document.body.className = s.cls;
+    pill.textContent = s.pill;
+    if (s.title) { errTitle.textContent = s.title; errDetail.textContent = s.detail; }
+    document.querySelectorAll('.dev-switcher button').forEach(b => b.classList.remove('active'));
+    document.getElementById('s-' + key).classList.add('active');
+  }
+  document.getElementById('s-ok').onclick     = () => setState('ok');
+  document.getElementById('s-port').onclick   = () => setState('port');
+  document.getElementById('s-folder').onclick = () => setState('folder');
+  document.getElementById('s-down').onclick   = () => setState('down');
+
+  // Activity flash demo (triggered every ~8s so you can see the effect)
+  const activityEl = document.getElementById('activity');
+  setInterval(() => {
+    activityEl.classList.remove('flash');
+    void activityEl.offsetWidth;
+    activityEl.classList.add('flash');
+  }, 8000);
+
+  // Buttons (no-op in preview)
+  document.getElementById('btn-open').onclick   = () => showToast('→ ouvrir le dossier');
+  document.getElementById('btn-change').onclick = () => showToast('→ dialogue choose-folder');
+  document.getElementById('btn-logs').onclick   = () => showToast('→ ouvrir auto-ftp.log');
+  document.getElementById('btn-quit').onclick   = () => showToast('→ arrêter le serveur');
+</script>
+</body>
+</html>

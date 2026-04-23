@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Serveur FTP EasyVIEW</title>
+  <link rel="stylesheet" href="./src/style.css" />
+</head>
+<body class="state-online">
+  <div class="shell">
+    <header class="header">
+      <h1 class="title">Serveur FTP EasyVIEW</h1>
+      <p class="subtitle">Laissez cette fenêtre ouverte pendant l'utilisation d'EasyVIEW.</p>
+      <span class="status-pill" id="pill">
+        <span class="dot"></span>
+        <span id="pill-label">SERVEUR EN LIGNE</span>
+      </span>
+    </header>
+
+    <section class="error-banner" id="banner" hidden>
+      <p class="error-title">Le serveur FTP n'a pas pu démarrer</p>
+      <p class="error-detail" id="err-detail"></p>
+      <p class="error-hint">Ouvrez « Voir les logs » et contactez le support en leur lisant le message ci-dessus.</p>
+    </section>
+
+    <section class="card">
+      <p class="card-title">À renseigner dans EasyVIEW (dans la VM)</p>
+      <div class="card-sep"></div>
+      <div class="rows" id="rows"></div>
+      <p class="ip-hint" id="ip-hint" hidden>Si la première adresse ne fonctionne pas, essayez les suivantes.</p>
+    </section>
+
+    <section class="card">
+      <p class="folder-label">Dossier de réception</p>
+      <p class="folder-path" id="folder-path"></p>
+      <p class="activity" id="activity">Aucun fichier reçu depuis le démarrage.</p>
+      <div class="actions">
+        <button class="btn" id="btn-open">Ouvrir le dossier</button>
+        <button class="btn" id="btn-change">Changer de dossier…</button>
+        <button class="btn" id="btn-logs">Voir les logs</button>
+        <button class="btn btn-danger" id="btn-quit">Quitter</button>
+      </div>
+    </section>
+
+    <p class="firewall-note">Au 1er lancement, Windows peut demander une autorisation réseau : cliquez sur « Autoriser l'accès ».</p>
+    <p class="version" id="version"></p>
+  </div>
+
+  <div class="toast" id="toast"></div>
+
+  <script type="module" src="./src/main.js"></script>
+</body>
+</html>
